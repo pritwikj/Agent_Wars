@@ -117,7 +117,7 @@ export function toolActionLabel(toolName, toolInput) {
 
   switch (key) {
     case 'bash':
-      target = squish(inp.command || inp.cmd || '', 34);
+      target = squish(inp.command || inp.cmd || '', 80);
       break;
     case 'read':
     case 'edit':
@@ -127,29 +127,29 @@ export function toolActionLabel(toolName, toolInput) {
       target = basename(inp.file_path || inp.path || inp.notebook_path || '');
       break;
     case 'grep':
-      target = inp.pattern ? `"${squish(inp.pattern, 22)}"` : '';
+      target = inp.pattern ? `"${squish(inp.pattern, 50)}"` : '';
       break;
     case 'glob':
-      target = squish(inp.pattern || inp.glob || '', 24);
+      target = squish(inp.pattern || inp.glob || '', 50);
       break;
     case 'ls':
       target = basename(inp.path || '') || '';
       break;
     case 'websearch':
-      target = inp.query ? `"${squish(inp.query, 26)}"` : '';
+      target = inp.query ? `"${squish(inp.query, 60)}"` : '';
       break;
     case 'webfetch':
       target = hostOf(inp.url);
       break;
     case 'task':
     case 'agent':
-      target = squish(inp.subagent_type || inp.description || '', 24);
+      target = squish(inp.subagent_type || inp.description || '', 50);
       break;
     default:
       // family-based fallback for unmapped tools
-      if (fam === 'exec') target = squish(inp.command || inp.cmd || '', 34);
+      if (fam === 'exec') target = squish(inp.command || inp.cmd || '', 80);
       else if (fam === 'edit' || fam === 'read') target = basename(inp.file_path || inp.path || '');
-      else if (fam === 'scan') target = inp.query ? `"${squish(inp.query, 26)}"` : hostOf(inp.url);
+      else if (fam === 'scan') target = inp.query ? `"${squish(inp.query, 60)}"` : hostOf(inp.url);
       break;
   }
 
