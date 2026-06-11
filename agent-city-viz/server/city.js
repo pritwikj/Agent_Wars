@@ -483,19 +483,13 @@ export class CityModel extends EventEmitter {
     this.sessionLot.clear();
     for (const d of save.districts ?? []) {
       if (!d || typeof d.key !== 'string' || !Array.isArray(d.lots)) continue;
-      for (const lot of d.lots) {
-        this.normalizeLoadedLot(lot);
-        // A reloaded city has no live sessions, so a lot that was mid-build can
-        // never be resumed by its old owner — top it out so the skyline reads
-        // as standing buildings ready for new sessions to add to / renovate.
-        if (lot.state !== 'complete') {
-          lot.state = 'complete';
-          lot.progress = lot.required;
-          lot.everCompleted = true;
-          if (lot.completedAt == null) lot.completedAt = save.savedAt ?? Date.now();
-        }
-      }
-      d.completedCount = d.lots.length;
+      for (const lot of d.lots) this.normalizeLoadedLot(lot);
+      // Preserve state across restarts: nothing is auto-completed or deleted.
+      // A lot left mid-build stays an under-construction site — a future crew
+      // can pick it up and finish it (see pickResumable).
+      d.completedCount = d.lots.filter(
+        (l) => l.everCompleted || l.state === 'complete'
+      ).length;
       this.districts.set(d.key, d);
       for (const b of d.blocks ?? []) this.usedBlocks.add(b);
     }
@@ -679,7 +673,18 @@ export class CityModel extends EventEmitter {
     if (existing && district.lots[existing.index] === existing) return existing;
 
     let lot = null;
-    if ((hash32(key) & 1) === 1) lot = this.pickUpgradeable(district, key);
+    if ((hash32(key) & 1) === 1) {
+      // Renovate half: 70/30 split favouring abandoned half-built sites over
+      // renovating a standing building (whichever is empty falls back to the
+      // other).
+      const preferResume = (hash32(`${key}:mix`) % 10) < 7;
+      lot = preferResume
+        ? this.pickResumable(district, key) || this.pickUpgradeable(district, key)
+        : this.pickUpgradeable(district, key) || this.pickResumable(district, key);
+    }
+    // Either half: before opening fresh ground, adopt any abandoned half-built
+    // site so it gets finished rather than left standing as scaffolding forever.
+    if (!lot) lot = this.pickResumable(district, key);
     if (!lot) lot = this.breakGround(district);
     lot.sessionId = key;
     this.sessionLot.set(key, lot);
@@ -698,6 +703,21 @@ export class CityModel extends EventEmitter {
     );
     if (!candidates.length) return null;
     return candidates[hash32(`${key}:up`) % candidates.length];
+  }
+
+  /**
+   * An abandoned, mid-construction lot in the district with no live session
+   * bound to it — a half-built site a new/hopping crew can move onto and finish.
+   * This is what keeps released sites from becoming permanent ghost scaffolding
+   * now that restarts no longer auto-complete them.
+   */
+  pickResumable(district, key) {
+    const bound = new Set(this.sessionLot.values());
+    const candidates = district.lots.filter(
+      (l) => l.state !== 'complete' && !bound.has(l)
+    );
+    if (!candidates.length) return null;
+    return candidates[hash32(`${key}:res`) % candidates.length];
   }
 
   /** Move a session (and its crew) onto a different building to renovate. */
@@ -787,10 +807,15 @@ export class CityModel extends EventEmitter {
     // finished park/landfill can't grow, so the crew always moves to a neighbour.
     // If nothing standing can still grow, break new ground so work never vanishes.
     if (lot.state === 'complete') {
-      const target = this.pickUpgradeable(d, `${sessionId}:hop:${lot.id}`);
+      // Prefer finishing an abandoned site, then renovating a finished one,
+      // and only break new ground if neither exists — work never vanishes.
+      const resume = this.pickResumable(d, `${sessionId}:res:${lot.id}`);
+      const target = resume || this.pickUpgradeable(d, `${sessionId}:hop:${lot.id}`);
       if (target) {
         lot = this.rebindSession(d, sessionId, target);
-        this.startUpgrade(d, lot, lot.sessionId);
+        // A finished building re-scaffolds for a renovation pass; an abandoned
+        // mid-build site just keeps accruing work until it tops out.
+        if (!resume) this.startUpgrade(d, lot, lot.sessionId);
       } else {
         lot = this.breakGround(d);
         this.rebindSession(d, sessionId, lot);

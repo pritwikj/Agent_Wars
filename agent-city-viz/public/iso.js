@@ -116,6 +116,23 @@
       cam.zoom = C.lerp(cam.zoom, cam.targetZoom, k);
     };
 
+    // Fly the camera to a world point (pre-camera screen px) at a chosen zoom.
+    // Marks the move as manual so auto-fit doesn't immediately yank back; the
+    // existing 30s idle timer resumes the whole-metro framing afterwards.
+    cam.focusOn = function (wx, wy, zoom) {
+      cam.manual = true;
+      cam.lastInputAt = performance.now();
+      cam.targetX = wx;
+      cam.targetY = wy;
+      if (typeof zoom === 'number') cam.targetZoom = C.clamp(zoom, MIN_ZOOM, MAX_ZOOM);
+    };
+
+    // Return to the default whole-metro auto-fit view (cancels manual pan/zoom).
+    cam.resetView = function () {
+      cam.manual = false;
+      cam.fit();
+    };
+
     // World -> canvas CSS pixel transform parameters.
     cam.viewTransform = function () {
       const cssW = canvas.clientWidth || 800;
