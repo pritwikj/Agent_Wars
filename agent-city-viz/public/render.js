@@ -386,7 +386,10 @@
           depth: C.lotDepth(lot),
           draw: (ctx2) => {
             C.drawLot(ctx2, lot, d, camera.zoom);
-            if (lot.state === 'construction') C.drawCrane(ctx2, lot, now);
+            if (lot.state === 'construction') {
+              C.drawSiteProps(ctx2, lot, now); // hoarding, cones, beacon, materials, digger
+              C.drawCrane(ctx2, lot, now);
+            }
           },
         });
       }

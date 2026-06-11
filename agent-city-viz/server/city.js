@@ -319,6 +319,9 @@ export const BUILDING_TYPES = {
   store:         { category: 'retail',  floors: [1, 3],   foot: [[1, 2], [2, 2]] },  // supermarket / big-box
   restaurant:    { category: 'retail',  floors: [1, 2],   foot: [[1, 1], [1, 2]] },  // diner / cafe
   school:        { category: 'school',  floors: [2, 4],   foot: [[1, 2], [2, 2]] },
+  // ── industry: a low production hall (sawtooth roof + smokestacks); off the
+  //    density chain like the civic types, grows within its own floor band ──
+  factory:       { category: 'industrial', floors: [2, 3], foot: [[2, 2]] },
   power_station: { category: 'power',   floors: [3, 4],   foot: [[2, 2]] },
   transit:       { category: 'transit', floors: [2, 3],   foot: [[1, 2], [2, 2]] },
   // ── civic services (Cities-Skylines style; off the density chain like the
@@ -338,8 +341,8 @@ export const BUILDING_TYPES = {
 // Weighted pools by maturity band; first band whose `until` exceeds n wins.
 export const TYPE_WEIGHTS = [
   { until: 4,        w: { house: 5, park: 3, apartment: 2, shop: 1, landfill: 1, school: 1 } },
-  { until: 10,       w: { apartment: 4, office: 3, shop: 2, restaurant: 1, store: 1, school: 2, transit: 2, house: 2, park: 2, power_station: 1, police: 1, fire_station: 1, hospital: 1 } },
-  { until: Infinity, w: { office: 4, skyscraper: 3, store: 2, restaurant: 1, power_station: 2, transit: 2, school: 1, park: 1, police: 1, fire_station: 1, hospital: 1, prison: 1 } },
+  { until: 10,       w: { apartment: 4, office: 3, shop: 2, restaurant: 1, store: 1, school: 2, transit: 2, house: 2, park: 2, power_station: 1, factory: 1, police: 1, fire_station: 1, hospital: 1 } },
+  { until: Infinity, w: { office: 4, skyscraper: 3, store: 2, restaurant: 1, power_station: 2, factory: 2, transit: 2, school: 1, park: 1, police: 1, fire_station: 1, hospital: 1, prison: 1 } },
 ];
 
 export function pickType(seed, n) {
@@ -412,10 +415,10 @@ function maxFloorsForType(type) { return (BUILDING_TYPES[type] || BUILDING_TYPES
 // the bigger stores and offices; the rural ring is farmland + homesteads.
 const HOOD_TYPE_WEIGHTS = {
   downtown: { skyscraper: 8, office: 5, apartment: 2, store: 2, restaurant: 1, transit: 1, hospital: 1 }, // CBD: skyscraper-led high-rise
-  inner:    { apartment: 5, office: 2, house: 2, shop: 2, restaurant: 1, store: 1, transit: 1, police: 1, prison: 1, fire_station: 1 },
+  inner:    { apartment: 5, office: 2, house: 2, shop: 2, restaurant: 1, store: 1, transit: 1, police: 1, prison: 1, fire_station: 1, factory: 1 },
   upper:    { house: 8, apartment: 2, park: 2, shop: 1, restaurant: 1, school: 1, hospital: 1, fire_station: 1 },
   middle:   { house: 7, apartment: 2, shop: 2, restaurant: 1, store: 1, school: 2, park: 1, police: 1, fire_station: 1, hospital: 1 },
-  working:  { house: 7, apartment: 2, shop: 1, store: 1, transit: 1, park: 1, police: 1, fire_station: 1, prison: 1 },
+  working:  { house: 7, apartment: 2, shop: 1, store: 1, transit: 1, park: 1, police: 1, fire_station: 1, prison: 1, factory: 2 },
   rural:    { house: 5, farm: 6, park: 1, shop: 1, school: 1 }, // homesteads scattered among fields
 };
 function pickTypeForHood(seed, hood) {

@@ -33,6 +33,16 @@
     ctx.closePath();
   }
 
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
   // Vertical (screen-space) gradient across a face quad, top -> bottom.
   function vGrad(ctx, pts, top, bot) {
     let yMin = Infinity, yMax = -Infinity;
@@ -114,6 +124,7 @@
     retail:  { style: 'stucco',   hue: 40,  s: 24, l: 70 },  // light stucco storefront
     school:  { style: 'brick',    hue: 8,   s: 32, l: 56 },  // brick red
     power:   { style: 'concrete', hue: 212, s: 8,  l: 64 },  // bare concrete
+    industrial:{ style: 'concrete', hue: 28, s: 14, l: 52 }, // weathered tan-grey metal/brick
     transit: { style: 'concrete', hue: 200, s: 16, l: 64 },  // steel grey-blue
     police:  { style: 'concrete', hue: 218, s: 18, l: 60 },  // pale civic grey-blue
     hospital:{ style: 'glass',    hue: 192, s: 10, l: 80 },  // clean white / teal glass
@@ -385,6 +396,37 @@
       'rgba(58,64,72,0.7)', 'rgba(228,231,234,0.25)');
     drawCoolingTower(ctx, tx + w * 0.62, ty + d * 0.7, C.FLOOR_H * 5.0);
     drawCoolingTower(ctx, tx + w * 0.3, ty + d * 0.82, C.FLOOR_H * 5.0);
+  }
+
+  // Factory: a long low production hall with a sawtooth north-light roof (a row
+  // of glazed monitors marching across the top), two back smokestacks and big
+  // roller doors on the front face — the silhouette that reads as "industry"
+  // at iso scale, without the office-window grid.
+  function paintFactory(ctx, pl, st, floors) {
+    const { tx, ty, w, d } = pl;
+    const h = floors * C.FLOOR_H;
+    // two smokestacks at the back (drawn first so the hall occludes their base)
+    drawSmokestack(ctx, tx + w * 0.22, ty + d * 0.2, C.FLOOR_H * 4.2);
+    drawSmokestack(ctx, tx + w * 0.36, ty + d * 0.13, C.FLOOR_H * 3.4);
+    // main hall + flat roof membrane
+    drawBox(ctx, tx, ty, w, d, 0, h, st.col);
+    drawRoofCap(ctx, tx, ty, w, d, h, st);
+    // two roller/loading doors on the SW (front) face
+    fillCell(ctx, 'left', tx, ty, w, d, 0, 0, w * 0.18, w * 0.46, 0.06, 0.7,
+      'rgba(54,60,68,0.72)', 'rgba(228,231,234,0.22)');
+    fillCell(ctx, 'left', tx, ty, w, d, 0, 0, w * 0.54, w * 0.82, 0.06, 0.7,
+      'rgba(54,60,68,0.72)', 'rgba(228,231,234,0.22)');
+    // sawtooth north-light monitors: a row of low ridges with a glazed face
+    const n = 4;
+    const mw = w * 0.1;
+    for (let i = 0; i < n; i++) {
+      const cx = tx + w * (0.14 + (i / n) * 0.72);
+      drawBox(ctx, cx, ty + d * 0.14, mw, d * 0.72, h, C.FLOOR_H * 0.6,
+        { h: st.col.h, s: 8, l: Math.max(8, st.col.l - 7) });
+      // teal glazing band on the monitor's lit (NE) face
+      fillCell(ctx, 'right', cx, ty + d * 0.14, mw, d * 0.72, h, 0,
+        0, d * 0.72, 0.12, 0.55, 'rgba(150,196,202,0.5)', 'rgba(40,58,62,0.3)');
+    }
   }
 
   // Transit hub: a low station box under a wide flat canopy, plus a painted
@@ -931,6 +973,7 @@
       const h = floors * C.FLOOR_H;
       // civic types have their own silhouette (towers / canopy)
       if (cat === 'power') { paintPowerStation(ctx, pl, st, floors); return; }
+      if (cat === 'industrial') { paintFactory(ctx, pl, st, floors); return; }
       if (cat === 'transit') { paintTransit(ctx, pl, st, floors); return; }
       if (cat === 'police') { paintPolice(ctx, pl, st, floors); return; }
       if (cat === 'hospital') { paintHospital(ctx, pl, st, floors); return; }
@@ -1023,6 +1066,7 @@
     // headroom above the wall top for type-specific caps (towers / spire / canopy)
     let topH = floors * C.FLOOR_H;
     if (cat === 'power') topH = Math.max(topH, C.FLOOR_H * 5.0) + 22;        // cooling towers + steam
+    else if (cat === 'industrial') topH = Math.max(topH, C.FLOOR_H * 4.2) + 18; // back smokestacks
     else if (b.type === 'skyscraper') topH += C.FLOOR_H * 3 + 36;           // crown variety (spire/pyramid/stepped + antenna)
     else if (cat === 'com') topH += C.FLOOR_H * 2.5 + 30;                    // office crowns (mech room / antenna / water tank)
     else if (cat === 'transit') topH += 14;                                  // canopy lip
@@ -1116,8 +1160,205 @@
     ctx.fillRect(jx - 2, hookY, 4, 4);
   }
 
+  // ---- Construction-zone site props (per-frame, active construction lots) ----------
+  // Ground clutter that makes a building site read unmistakably as a WORK ZONE:
+  // safety hoarding, cones, an amber beacon, material stockpiles, a skip, a
+  // warning sign, and an excavator during the dig/foundation stages. All keyed
+  // off the building's seed (never the agent's tool kind — design rule 1) and
+  // placed in the viewer-facing half of the parcel so they layer over the
+  // building's front faces correctly. Drawn AFTER the building sprite, BEFORE
+  // the crane (see render.js).
+
+  // Temporary mesh fencing run along a ground edge a->b, with orange top rail.
+  function fenceRun(ctx, ax, ay, bx, by) {
+    const segs = 4, H = 11;
+    for (let i = 0; i < segs; i++) {
+      const t0 = i / segs, t1 = (i + 1) / segs;
+      const x0 = ax + (bx - ax) * t0, y0 = ay + (by - ay) * t0;
+      const x1 = ax + (bx - ax) * t1, y1 = ay + (by - ay) * t1;
+      const aLo = w2s(x0, y0, 0), bLo = w2s(x1, y1, 0), bHi = w2s(x1, y1, H), aHi = w2s(x0, y0, H);
+      poly(ctx, [aLo, bLo, bHi, aHi]);
+      ctx.fillStyle = 'rgba(190,194,198,0.16)';      // see-through mesh
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120,126,132,0.55)';
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+      ctx.beginPath();                               // cross braces
+      ctx.moveTo(aLo.x, aLo.y); ctx.lineTo(bHi.x, bHi.y);
+      ctx.moveTo(bLo.x, bLo.y); ctx.lineTo(aHi.x, aHi.y);
+      ctx.stroke();
+      ctx.strokeStyle = '#ff7a18';                   // orange top rail
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(aHi.x, aHi.y); ctx.lineTo(bHi.x, bHi.y); ctx.stroke();
+    }
+    for (let i = 0; i <= segs; i++) {                // posts + feet
+      const t = i / segs, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+      const lo = w2s(x, y, 0), hi = w2s(x, y, H);
+      ctx.strokeStyle = '#8a9096'; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(lo.x, lo.y); ctx.lineTo(hi.x, hi.y); ctx.stroke();
+      ctx.fillStyle = 'rgba(40,46,52,0.4)';
+      ctx.beginPath(); ctx.ellipse(lo.x, lo.y, 2.4, 1.1, 0, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function coneAt(ctx, tx, ty) {
+    const base = w2s(tx, ty, 0), tip = w2s(tx, ty, 7);
+    ctx.fillStyle = '#e8690d';                       // base flange
+    ctx.beginPath(); ctx.ellipse(base.x, base.y, 3.6, 1.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ff7a18';                       // cone body
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y); ctx.lineTo(base.x - 3.2, base.y); ctx.lineTo(base.x + 3.2, base.y);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';         // reflective band
+    ctx.beginPath();
+    ctx.moveTo(tip.x - 1.5, tip.y + 2.6); ctx.lineTo(tip.x + 1.5, tip.y + 2.6);
+    ctx.lineTo(tip.x + 1.9, tip.y + 3.9); ctx.lineTo(tip.x - 1.9, tip.y + 3.9);
+    ctx.closePath(); ctx.fill();
+  }
+
+  function moundAt(ctx, tx, ty, r, col) {            // gravel / sand stockpile
+    const c = w2s(tx, ty, 0), top = w2s(tx, ty, 6.5);
+    ctx.fillStyle = 'rgba(40,46,52,0.22)';
+    ctx.beginPath(); ctx.ellipse(c.x, c.y, r, r * 0.45, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(c.x - r, c.y);
+    ctx.quadraticCurveTo(c.x - r * 0.4, top.y, c.x, top.y - 1);
+    ctx.quadraticCurveTo(c.x + r * 0.4, top.y, c.x + r, c.y);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';        // sunlit face
+    ctx.beginPath();
+    ctx.moveTo(c.x, top.y - 1);
+    ctx.quadraticCurveTo(c.x + r * 0.4, top.y, c.x + r, c.y);
+    ctx.lineTo(c.x, c.y); ctx.closePath(); ctx.fill();
+  }
+
+  function pipeStack(ctx, tx, ty) {                  // stacked pipe / duct ends
+    const b = w2s(tx, ty, 0), r = 2.3;
+    const ends = [[-2.6, 0], [0.2, 0], [3, 0], [-1.2, -3.6], [1.6, -3.6]];
+    for (const [dx, dy] of ends) {
+      ctx.fillStyle = '#9aa1a6';
+      ctx.beginPath(); ctx.ellipse(b.x + dx, b.y + dy - 3, r, r, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#5f676c';
+      ctx.beginPath(); ctx.ellipse(b.x + dx, b.y + dy - 3, r * 0.5, r * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function skipAt(ctx, tx, ty, seed) {               // builder's skip / dumpster
+    const hue = (seed & 8) ? 14 : 45;                // rusty orange or yellow
+    drawBox(ctx, tx, ty, 0.7, 0.45, 0, 7, { h: hue, s: 72, l: 50 });
+    const a = w2s(tx, ty + 0.45, 7), b = w2s(tx + 0.7, ty, 7);
+    ctx.fillStyle = 'rgba(40,30,18,0.55)';           // rubble heaped above the rim
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y); ctx.lineTo((a.x + b.x) / 2, Math.min(a.y, b.y) - 2.5); ctx.lineTo(b.x, b.y);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Ambient site crew — extra hard-hat workers beyond the session figures, so a
+  // building site looks properly busy. Purely decorative (not tied to any
+  // session); positions are seeded, the work animation is driven by `now`.
+  function siteWorker(ctx, tx, ty, now, phase, hue) {
+    const p = w2s(tx, ty, 0);
+    const swing = Math.abs(Math.sin(now / 150 + phase));   // tool / dig motion
+    const bob = swing * 1.0;
+    const baseY = p.y - bob;
+    const H = 15;
+    ctx.fillStyle = 'rgba(30,40,50,0.22)';                  // shadow
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, 4.6, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#3a4450';                              // legs
+    ctx.fillRect(p.x - 2.2, baseY - 5, 1.8, 5);
+    ctx.fillRect(p.x + 0.5, baseY - 5, 1.8, 5);
+    ctx.fillStyle = 'hsl(' + hue + ',62%,52%)';             // hi-vis vest
+    roundRect(ctx, p.x - 2.8, baseY - H + 4, 5.6, H - 8, 1.8); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';                // vest stripe
+    ctx.fillRect(p.x - 2.4, baseY - H + 7, 4.8, 1);
+    ctx.strokeStyle = '#caa36a';                            // swinging tool arm
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(p.x + 2, baseY - H + 8);
+    ctx.lineTo(p.x + 5, baseY - H + 5 - swing * 3);
+    ctx.stroke();
+    const headY = baseY - H + 1;
+    ctx.fillStyle = '#e8b88f';                              // head
+    ctx.beginPath(); ctx.arc(p.x, headY, 2.3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffb400';                              // hard hat
+    ctx.beginPath(); ctx.arc(p.x, headY - 0.7, 2.5, Math.PI, 0); ctx.fill();
+    ctx.fillRect(p.x - 3, headY - 1, 6, 1);
+  }
+
+  function diggerAt(ctx, tx, ty, now) {              // excavator (dig/foundation)
+    const b = w2s(tx, ty, 0);
+    ctx.fillStyle = '#3a4046';                        // tracks
+    ctx.fillRect(b.x - 7, b.y - 3.5, 14, 4);
+    ctx.fillStyle = '#22262b';
+    for (let i = -6; i <= 5; i += 2.4) { ctx.fillRect(b.x + i, b.y - 3.5, 1.2, 4); }
+    ctx.fillStyle = '#f2b21a';                        // cab body
+    ctx.fillRect(b.x - 5, b.y - 11, 9, 8);
+    ctx.fillStyle = '#2b6c8f';                        // cab glass
+    ctx.fillRect(b.x - 3.5, b.y - 10, 4, 4);
+    const sw = Math.sin(now / 700) * 0.25;            // boom slowly digs
+    const sh = { x: b.x + 3, y: b.y - 9 };
+    const elbow = { x: sh.x + 8, y: sh.y + 1 + sw * 6 };
+    const bucket = { x: elbow.x + 3, y: elbow.y + 6 };
+    ctx.strokeStyle = '#d99a16'; ctx.lineWidth = 2.4; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(sh.x, sh.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(bucket.x, bucket.y);
+    ctx.stroke();
+    ctx.fillStyle = '#caa033';                        // bucket
+    ctx.beginPath();
+    ctx.moveTo(bucket.x - 1, bucket.y - 2); ctx.lineTo(bucket.x + 3.5, bucket.y);
+    ctx.lineTo(bucket.x + 1.5, bucket.y + 3.5); ctx.closePath(); ctx.fill();
+  }
+
+  function drawSiteProps(ctx, lot, now) {
+    const stage = stageOf(lot);
+    if (stage.key === 'done') return;
+    const pl = C.lotPlacement(lot);
+    const px = pl.parcelTx, py = pl.parcelTy;
+    const seed = (lot.building && lot.building.seed) || 0;
+
+    // Safety hoarding along the two viewer-facing parcel edges, each stopping
+    // short of the S corner to leave a site gate.
+    fenceRun(ctx, px + 0.08, py + 1.92, px + 1.25, py + 1.92);   // front-left edge
+    fenceRun(ctx, px + 1.92, py + 0.08, px + 1.92, py + 1.25);   // front-right edge
+
+    // Material stockpiles on the visible margins.
+    moundAt(ctx, px + 0.5, py + 1.55, 6.5, '#b89b6a');           // sand / gravel
+    pipeStack(ctx, px + 1.55, py + 0.5);
+    skipAt(ctx, px + 1.42, py + 1.42, seed);
+
+    // Excavator while the pit is open / slab going in.
+    if (stage.key === 'dig' || stage.key === 'foundation') {
+      diggerAt(ctx, px + 1.0, py + 1.5, now);
+    }
+
+    // Ambient crew working the site. Same full crew on every site.
+    const crew = [
+      [px + 0.78, py + 1.35, 0.0, 28],
+      [px + 1.35, py + 0.8, 1.7, 200],
+      [px + 1.62, py + 1.62, 3.1, 140],
+      [px + 0.45, py + 1.05, 4.4, 48],
+    ];
+    for (const c of crew) siteWorker(ctx, c[0], c[1], now, c[2], c[3]);
+
+    // Cones flanking the gate at the near corner.
+    coneAt(ctx, px + 1.5, py + 2.02);
+    coneAt(ctx, px + 2.02, py + 1.5);
+    coneAt(ctx, px + 0.72, py + 2.04);
+
+    // Amber safety beacon on the gate post, blinking.
+    const blink = Math.sin(now / 300) + 1 > 1.2;
+    const bp = w2s(px + 1.25, py + 1.92, 12);
+    ctx.fillStyle = blink ? 'rgba(255,170,30,0.95)' : 'rgba(150,90,10,0.6)';
+    ctx.beginPath(); ctx.arc(bp.x, bp.y, blink ? 2.6 : 1.8, 0, Math.PI * 2); ctx.fill();
+    if (blink) {
+      ctx.fillStyle = 'rgba(255,200,80,0.28)';
+      ctx.beginPath(); ctx.arc(bp.x, bp.y, 5.2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
   Object.assign(window.CITY, {
-    drawDiamond, drawBox, drawLot, drawLotShadow, drawCrane, lotDepth, stageOf,
+    drawDiamond, drawBox, drawLot, drawLotShadow, drawCrane, drawSiteProps, lotDepth, stageOf,
     invalidateLot, buildingStyle, buildingHeight,
   });
 })();
