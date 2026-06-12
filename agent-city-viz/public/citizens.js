@@ -415,6 +415,23 @@
     return { x: p.x, y: p.y - 20, citizen: cz };
   }
 
+  /**
+   * Lot ids that have a LIVE crew on them right now — i.e. a Claude Code
+   * session (or one of its subagents) is currently bound to and working that
+   * building. Construction sites NOT in this set are left as empty work zones
+   * (props but no workers) per the design rule: only staff a site when a
+   * session is actually building it.
+   */
+  function activeBuildLots() {
+    const ids = new Set();
+    for (const cz of citizens.values()) {
+      if (cz.leaving) continue;
+      const lot = buildingLotFor(cz);
+      if (lot) ids.add(lot.id);
+    }
+    return ids;
+  }
+
   function counts() {
     let sessions = 0, crews = 0;
     for (const cz of citizens.values()) {
@@ -435,5 +452,6 @@
     spawnCitizen, updateCitizen, removeCitizen, applyCitizenSnapshot: applySnapshot,
     setAggregates, updateCitizens: updateAll, collectCitizenDrawables: collectDrawables,
     citizenAnchor: anchorOf, citizenCounts: counts, citizenTitle: titleFor,
+    activeBuildLots,
   });
 })();

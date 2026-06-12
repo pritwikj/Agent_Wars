@@ -1409,7 +1409,7 @@
     ctx.lineTo(bucket.x + 1.5, bucket.y + 3.5); ctx.closePath(); ctx.fill();
   }
 
-  function drawSiteProps(ctx, lot, now) {
+  function drawSiteProps(ctx, lot, now, hasCrew) {
     const stage = stageOf(lot);
     if (stage.key === 'done') return;
     const pl = C.lotPlacement(lot);
@@ -1431,14 +1431,19 @@
       diggerAt(ctx, px + 1.0, py + 1.5, now);
     }
 
-    // Ambient crew working the site. Same full crew on every site.
-    const crew = [
-      [px + 0.78, py + 1.35, 0.0, 28],
-      [px + 1.35, py + 0.8, 1.7, 200],
-      [px + 1.62, py + 1.62, 3.1, 140],
-      [px + 0.45, py + 1.05, 4.4, 48],
-    ];
-    for (const c of crew) siteWorker(ctx, c[0], c[1], now, c[2], c[3]);
+    // Ambient crew working the site — ONLY when a Claude Code session is
+    // actually building here (hasCrew). An unmanned site keeps its props
+    // (hoarding, materials, crane) but stands empty: a construction site with
+    // no workers, never a fake-busy one.
+    if (hasCrew) {
+      const crew = [
+        [px + 0.78, py + 1.35, 0.0, 28],
+        [px + 1.35, py + 0.8, 1.7, 200],
+        [px + 1.62, py + 1.62, 3.1, 140],
+        [px + 0.45, py + 1.05, 4.4, 48],
+      ];
+      for (const c of crew) siteWorker(ctx, c[0], c[1], now, c[2], c[3]);
+    }
 
     // Cones flanking the gate at the near corner.
     coneAt(ctx, px + 1.5, py + 2.02);

@@ -379,15 +379,19 @@
 
   // ---- Scene draw list --------------------------------------------------------------
   function collectLotDrawables(list, now) {
+    // Lots that have a live session/crew on them this frame — only these
+    // construction sites get staffed with workers; the rest stay empty zones.
+    const crewLots = (C.activeBuildLots && C.activeBuildLots()) || null;
     for (const d of C.districts.values()) {
       for (const lot of d.lots || []) {
         if (!lot) continue;
+        const hasCrew = !!(crewLots && crewLots.has(lot.id));
         list.push({
           depth: C.lotDepth(lot),
           draw: (ctx2) => {
             C.drawLot(ctx2, lot, d, camera.zoom);
             if (lot.state === 'construction') {
-              C.drawSiteProps(ctx2, lot, now); // hoarding, cones, beacon, materials, digger
+              C.drawSiteProps(ctx2, lot, now, hasCrew); // hoarding, cones, beacon, materials, digger
               C.drawCrane(ctx2, lot, now);
             }
           },
