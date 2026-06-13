@@ -38,7 +38,7 @@
 
   // ---- Tunables -------------------------------------------------------------
   const BELT_MARGIN = 2;            // highway ring, tiles outside the blocks
-  const RAIL_MARGIN = 5;            // rail loop, further out
+  const RAIL_MARGIN = 3;            // rail loop, just outside the beltway (hugs the city edge)
   const RAIL_MIN_BLOCKS = 4;
   const AIRPORT_MIN_BLOCKS = 6;
   const AF_GAP = 3;                 // tiles past the rail loop's east edge
@@ -46,9 +46,12 @@
   const AF_HALF = 4;               // airfield half-depth (along ty)
   const CONN_WORK_PER_TILE = 3;     // Σwork to pave one tile of a connector freeway
   const TOWN_MARGIN = 2;            // clearing kept around a satellite town
-  const RAIL_CHAMFER = 4;           // corner cut on the rail loop (softens the rectangle)
-  const RAIL_DEPOT_INSET = 2.4;     // station depot tiles inward (city-side) of the loop line
-  const RAIL_SPUR_EXTRA = 1.6;      // extra siding stub past the depot, into the city (subway feel)
+  const RAIL_CHAMFER = 4;           // corner radius on the rail loop (rounds the rectangle)
+  const RAIL_CORNER_PTS = 4;        // straight segments approximating each rounded corner
+  const RAIL_PLATFORM_HALF = 2.6;   // station platform half-length, along the track tangent
+  const RAIL_PLATFORM_DEPTH = 0.9;  // platform reach inward (city-side) from the rail line
+  const RAIL_BOARD_INSET = 0.7;     // where riders stand on the platform, beside a stopped train
+  const RAIL_DEPOT_INSET = 1.5;     // headhouse building tiles inward, just behind the platform
   const RAIL_BRANCH_WORK_PER_TILE = 3;  // Σwork to lay one tile of a suburb branch line
   const RAIL_TOWN_MIN_BLOCKS = 2;   // a suburb earns rail only once it's a real town
                                     // (≥ this many blocks) AND its road is finished —
@@ -201,8 +204,9 @@
     return { seg, total };
   }
 
-  // Cut every corner of a closed polygon into two points, turning a rigid
-  // rectangle into a chamfered ring that reads as a real rail alignment.
+  // Round every corner of a closed polygon into a small circular arc, turning a
+  // rigid rectangle into a smoothly curved ring that reads as a real rail
+  // alignment — trains sweep the corners instead of kinking at a hard cut.
   function chamfer(pts, c) {
     const out = [];
     const n = pts.length;
@@ -211,8 +215,19 @@
       const inx = cur.tx - prev.tx, iny = cur.ty - prev.ty, lIn = Math.hypot(inx, iny) || 1;
       const oux = next.tx - cur.tx, ouy = next.ty - cur.ty, lOut = Math.hypot(oux, ouy) || 1;
       const cc = Math.min(c, lIn / 2, lOut / 2);
-      out.push({ tx: cur.tx - (inx / lIn) * cc, ty: cur.ty - (iny / lIn) * cc });
-      out.push({ tx: cur.tx + (oux / lOut) * cc, ty: cur.ty + (ouy / lOut) * cc });
+      const ux = inx / lIn, uy = iny / lIn;      // incoming unit dir
+      const vx = oux / lOut, vy = ouy / lOut;    // outgoing unit dir
+      const a = { tx: cur.tx - ux * cc, ty: cur.ty - uy * cc };   // arc start (on incoming edge)
+      const b = { tx: cur.tx + vx * cc, ty: cur.ty + vy * cc };   // arc end (on outgoing edge)
+      // Quadratic-Bezier sweep from a to b with the rectangle corner as control
+      // point — gives a clean rounded corner whose midpoint bulges toward `cur`.
+      out.push(a);
+      for (let k = 1; k < RAIL_CORNER_PTS; k++) {
+        const t = k / RAIL_CORNER_PTS, mt = 1 - t;
+        const w0 = mt * mt, w1 = 2 * mt * t, w2 = t * t;
+        out.push({ tx: w0 * a.tx + w1 * cur.tx + w2 * b.tx, ty: w0 * a.ty + w1 * cur.ty + w2 * b.ty });
+      }
+      out.push(b);
     }
     return out;
   }
@@ -281,15 +296,21 @@
       { tx: slideOnSide(rr[3].tx, rr[2].tx, dx), ty: rr[2].ty },  // S
       { tx: rr[0].tx, ty: slideOnSide(rr[0].ty, rr[3].ty, dy) },  // W
     ];
+    // Inward (city-side) cardinal normal for each side — N,E,S,W — so the platform
+    // runs straight along the rail tangent and the headhouse sits squarely behind it.
+    const SIDE_NORMAL = [{ nx: 0, ny: 1 }, { nx: -1, ny: 0 }, { nx: 0, ny: -1 }, { nx: 1, ny: 0 }];
     const stations = sideMid.map((P, i) => {
-      let nx = cx - P.tx, ny = cy - P.ty; const mm = Math.hypot(nx, ny) || 1; nx /= mm; ny /= mm;
+      const { nx, ny } = SIDE_NORMAL[i];
       return {
         sid: 'c' + i,
-        loop: { tx: P.tx, ty: P.ty },
+        loop: { tx: P.tx, ty: P.ty },                 // train stops here, on the rail line
         sArc: arcLengthAt(corners, m.seg, P),
         normal: { nx, ny },
-        depot: { tx: P.tx + nx * RAIL_DEPOT_INSET, ty: P.ty + ny * RAIL_DEPOT_INSET },
-        spurEnd: { tx: P.tx + nx * (RAIL_DEPOT_INSET + RAIL_SPUR_EXTRA), ty: P.ty + ny * (RAIL_DEPOT_INSET + RAIL_SPUR_EXTRA) },
+        // riders wait on the platform edge, right beside a stopped train
+        board: { tx: P.tx + nx * RAIL_BOARD_INSET, ty: P.ty + ny * RAIL_BOARD_INSET },
+        // headhouse building, just behind the platform (drawn from the rail point)
+        depot: { tx: P.tx, ty: P.ty },
+        platHalf: RAIL_PLATFORM_HALF, platDepth: RAIL_PLATFORM_DEPTH,
       };
     });
     const branches = [];
@@ -308,9 +329,17 @@
         : { tx: Math.round(t.cx), ty: dy > 0 ? t.y0 - TOWN_MARGIN : t.y1 + TOWN_MARGIN };
       const elbow = horiz ? { tx: start.tx, ty: sd.ty } : { tx: sd.tx, ty: start.ty };
       const bc = [{ tx: start.tx, ty: start.ty }, elbow, { tx: sd.tx, ty: sd.ty }];
-      let snx = t.cx - sd.tx, sny = t.cy - sd.ty; const sm = Math.hypot(snx, sny) || 1; snx /= sm; sny /= sm;
+      // Side-platform normal: perpendicular to the final approach segment, pointed
+      // toward the town body — so the shuttle stops ALONGSIDE a platform, not
+      // nose-first into a building.
+      const fdx = sd.tx - elbow.tx, fdy = sd.ty - elbow.ty;
+      let snx, sny;
+      if (Math.abs(fdx) >= Math.abs(fdy)) { snx = 0; sny = 1; } else { snx = 1; sny = 0; }
+      if (snx * (t.cx - sd.tx) + sny * (t.cy - sd.ty) < 0) { snx = -snx; sny = -sny; }
       branches.push(Object.assign({
         coreIdx: ci, coreSid: 'c' + ci, corners: bc, depot: sd, normal: { nx: snx, ny: sny },
+        board: { tx: sd.tx + snx * RAIL_BOARD_INSET, ty: sd.ty + sny * RAIL_BOARD_INSET },
+        platHalf: RAIL_PLATFORM_HALF, platDepth: RAIL_PLATFORM_DEPTH,
         town: { cx: t.cx, cy: t.cy, size: t.size },
       }, pathMetrics(bc)));
     }

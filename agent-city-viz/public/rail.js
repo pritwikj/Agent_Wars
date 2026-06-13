@@ -23,22 +23,35 @@
   const TRACK_DEPTH = -1e12 + 10;
   const CULL_MARGIN = 90;
   const RAIL_GAUGE = 0.16;
+  const TIE_SPACING = 0.42;    // world tiles between sleepers
+  const TIE_HALF = 0.27;       // sleeper half-length (a bit wider than the gauge)
   const CAR_LEN = 1.5, CAR_GAP = 0.25, CAR_WID = 0.46;
   const N_CARS = 4;            // cars on the main loop train
+  const N_TRAINS = 2;          // trains circulating the loop, spaced a headway apart
   const SHUTTLE_CARS = 2;      // cars on a suburb shuttle (short, so reversing reads fine)
   const CRUISE = 4.0;         // loop train cruise (tiles/s)
   const SHUTTLE_CRUISE = 3.0;
   const DWELL_MS = 1600;
+  // The lead car runs CONSIST_MID ahead of the consist's middle, so stopping with
+  // the consist centred on a station means leaving the lead this far past it — the
+  // cars then straddle the platform instead of overrunning it.
+  const CONSIST_MID = ((N_CARS - 1) / 2) * (CAR_LEN + CAR_GAP);
 
-  // Main loop train and per-branch shuttles.
-  const train = { lead: 0, v: 0, dwellUntil: 0, alpha: 0, atStation: -1 };
+  // Main loop trains and per-branch shuttles.
+  let trains = [];             // [{lead,v,dwellUntil,alpha,atStation}]
   let shuttles = [];           // [{pos,v,dir,dwellUntil,atEnd,alpha}] parallel to rail.branchGeo
   let stationPts = [];         // ready depots, for the rider API
+  let crossings = [];          // [{tx,ty,dirx,diry}] level crossings (built rail ∩ road)
+  let crossSig = '';           // cache key so crossings recompute only when geometry/roads change
   let infraVer = -1;
 
   function rebuild() {
     const rail = C.infra.rail();
-    train.lead = 0; train.v = 0; train.dwellUntil = 0; train.alpha = 0; train.atStation = -1;
+    const total = rail ? rail.total : 0;
+    trains = [];
+    for (let k = 0; k < N_TRAINS; k++) {
+      trains.push({ lead: (total * k) / N_TRAINS, v: 0, dwellUntil: 0, alpha: 0, atStation: -1, justLeft: -1 });
+    }
     const n = rail ? rail.branchGeo.length : 0;
     shuttles = [];
     for (let i = 0; i < n; i++) shuttles.push({ pos: 0, v: 0, dir: 1, dwellUntil: 0, atEnd: -1, alpha: 0 });
@@ -46,12 +59,16 @@
     infraVer = C.infra.version();
   }
 
-  // Nearest stop ahead of the loop train, as {d: arc distance, i: station index}.
-  function nearestStationFwd(rail) {
+  // Nearest stop ahead of a train's consist CENTRE (lead - CONSIST_MID), as
+  // {d: arc distance, i: station index}. `skip` is the stop just departed — ignored
+  // while still adjacent so the train pulls away instead of re-dwelling on the spot.
+  function nearestStationFwd(rail, lead, skip) {
+    const ref = lead - CONSIST_MID;
     let bd = Infinity, bi = -1;
     for (let i = 0; i < rail.stations.length; i++) {
-      let d = rail.stations[i].sArc - train.lead;
+      let d = rail.stations[i].sArc - ref;
       d = ((d % rail.total) + rail.total) % rail.total;
+      if (i === skip && d < 1.0) continue;
       if (d < bd) { bd = d; bi = i; }
     }
     return { d: bd, i: bi };
@@ -80,12 +97,12 @@
     stationPts = [];
     if (!rail.complete) return;
     rail.stations.forEach((s, i) => {
-      if (rail.depotProg[i] >= 1) stationPts.push({ sid: s.sid, tx: s.depot.tx, ty: s.depot.ty, core: true, line: 'core' });
+      if (rail.depotProg[i] >= 1) stationPts.push({ sid: s.sid, tx: s.board.tx, ty: s.board.ty, core: true, line: 'core' });
     });
     rail.branchGeo.forEach((br, i) => {
       const bs = rail.branches[i];
       if (bs.paveFrac >= 1 && bs.depotProg >= 1 && rail.depotProg[br.coreIdx] >= 1) {
-        stationPts.push({ sid: br.sid, tx: br.depot.tx, ty: br.depot.ty, core: false, line: br.sid, coreSid: br.coreSid });
+        stationPts.push({ sid: br.sid, tx: br.board.tx, ty: br.board.ty, core: false, line: br.sid, coreSid: br.coreSid });
       }
     });
   }
@@ -96,20 +113,26 @@
     const rail = C.infra.rail();
     if (!rail) return;
 
-    // main loop train — runs only once the whole loop is laid
-    if (!rail.complete) { train.v = 0; train.alpha = 0; train.atStation = -1; }
-    else {
+    // main loop trains — run only once the whole loop is laid
+    for (const train of trains) {
+      if (!rail.complete) { train.v = 0; train.alpha = 0; train.atStation = -1; train.justLeft = -1; continue; }
       if (train.alpha < 1) train.alpha = Math.min(1, train.alpha + dt * 1.6);
-      if (train.dwellUntil > now) { train.v = 0; }   // dwelling — atStation holds
-      else {
-        train.atStation = -1;
-        const ns = nearestStationFwd(rail);
-        if (ns.d < 0.25 && train.v < 0.6) { train.dwellUntil = now + DWELL_MS; train.v = 0; train.atStation = ns.i; }
-        else {
-          const target = ns.d < 4 ? Math.min(CRUISE, 0.5 + ns.d * 1.1) : CRUISE;
-          const a = target > train.v ? 3.0 : -4.5;
-          train.v = Math.max(0, train.v + a * dt);
-          train.lead += train.v * dt;
+      if (train.dwellUntil > now) { train.v = 0; continue; }   // dwelling — atStation holds
+      train.atStation = -1;
+      const ns = nearestStationFwd(rail, train.lead, train.justLeft);
+      if (ns.i >= 0 && ns.d < 0.25 && train.v < 0.6) {
+        train.dwellUntil = now + DWELL_MS; train.v = 0; train.atStation = ns.i; train.justLeft = ns.i;
+        train.lead = rail.stations[ns.i].sArc + CONSIST_MID;   // snap so cars straddle the platform
+      } else {
+        const target = ns.d < 4 ? Math.min(CRUISE, 0.5 + ns.d * 1.1) : CRUISE;
+        const a = target > train.v ? 3.0 : -4.5;
+        train.v = Math.max(0, train.v + a * dt);
+        train.lead += train.v * dt;
+        // once pulled clear of the stop we just left, allow stopping there again next lap
+        if (train.justLeft >= 0) {
+          let ds = rail.stations[train.justLeft].sArc - (train.lead - CONSIST_MID);
+          ds = ((ds % rail.total) + rail.total) % rail.total;
+          if (ds > 2.0) train.justLeft = -1;
         }
       }
     }
@@ -122,6 +145,12 @@
     }
 
     rebuildStationPts(rail);
+
+    // level crossings change only when the road network or how far the rail is
+    // laid changes — recompute on a cheap signature, not every frame.
+    const sig = C.infra.roadVersion() + ':' + Math.round(rail.loopFrac * 40) + ':' +
+      rail.branches.map((b) => Math.round(b.paveFrac * 20)).join(',');
+    if (sig !== crossSig) { crossSig = sig; crossings = findCrossings(rail); }
   }
 
   // ---- drawing primitives ---------------------------------------------------
@@ -140,19 +169,37 @@
   }
   function edgePoint(a, b, f) { return { tx: a.tx + (b.tx - a.tx) * f, ty: a.ty + (b.ty - a.ty) * f }; }
 
-  // A length of finished (laid) or graded (unlaid) track between two world tiles.
+  // A length of finished (laid) or graded (unlaid) track between two world tiles —
+  // a gravel ballast bed, evenly spaced perpendicular sleepers, and twin steel
+  // rails with a bright top highlight.
   function drawRailWorld(ctx, a, b, laid) {
-    const s0 = w2s(a.tx + 0.5, a.ty + 0.5, 0), s1 = w2s(b.tx + 0.5, b.ty + 0.5, 0);
+    const ax = a.tx + 0.5, ay = a.ty + 0.5, bx = b.tx + 0.5, by = b.ty + 0.5;
+    const s0 = w2s(ax, ay, 0), s1 = w2s(bx, by, 0);
     ctx.lineCap = 'butt';
-    strokeBetween(ctx, s0, s1, 11, 'rgba(20,26,34,0.16)');
-    strokeBetween(ctx, s0, s1, 9, laid ? '#8a7d63' : '#7c6a4f');
-    strokeBetween(ctx, s0, s1, 8, 'rgba(70,52,36,0.6)', [1.4, 3.4]);
-    if (!laid) return;
-    let dx = b.tx - a.tx, dy = b.ty - a.ty; const m = Math.hypot(dx, dy) || 1; dx /= m; dy /= m;
+    // ballast bed: a dark shoulder under a gravel crown
+    strokeBetween(ctx, s0, s1, 10, 'rgba(20,26,34,0.18)');
+    strokeBetween(ctx, s0, s1, 8, laid ? '#9a9086' : '#7c6a4f');
+    if (!laid) { strokeBetween(ctx, s0, s1, 6, 'rgba(96,80,56,0.45)'); return; }   // graded earth
+
+    let dx = bx - ax, dy = by - ay; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+    const px = -dy, py = dx;                          // unit perpendicular (tile space)
+    // sleepers — evenly spaced ties, drawn as one path
+    ctx.strokeStyle = '#5c4a34'; ctx.lineWidth = 2.2; ctx.setLineDash([]);
+    const ties = Math.max(1, Math.round(L / TIE_SPACING));
+    ctx.beginPath();
+    for (let i = 0; i <= ties; i++) {
+      const f = i / ties, cx = ax + (bx - ax) * f, cy = ay + (by - ay) * f;
+      const e0 = w2s(cx + px * TIE_HALF, cy + py * TIE_HALF, 0);
+      const e1 = w2s(cx - px * TIE_HALF, cy - py * TIE_HALF, 0);
+      ctx.moveTo(e0.x, e0.y); ctx.lineTo(e1.x, e1.y);
+    }
+    ctx.stroke();
+    // twin steel rails + highlight
     for (const sgn of [-1, 1]) {
-      const r0 = w2s(a.tx + 0.5 - dy * sgn * RAIL_GAUGE, a.ty + 0.5 + dx * sgn * RAIL_GAUGE, 0);
-      const r1 = w2s(b.tx + 0.5 - dy * sgn * RAIL_GAUGE, b.ty + 0.5 + dx * sgn * RAIL_GAUGE, 0);
-      strokeBetween(ctx, r0, r1, 1, 'rgba(196,202,210,0.85)');
+      const r0 = w2s(ax + px * sgn * RAIL_GAUGE, ay + py * sgn * RAIL_GAUGE, 0);
+      const r1 = w2s(bx + px * sgn * RAIL_GAUGE, by + py * sgn * RAIL_GAUGE, 0);
+      strokeBetween(ctx, r0, r1, 1.7, '#6b7178');
+      strokeBetween(ctx, r0, r1, 0.7, 'rgba(226,231,237,0.9)');
     }
   }
   function drawSurveyWorld(ctx, a, b) {
@@ -163,6 +210,59 @@
     const s = w2s(p.tx + 0.5, p.ty + 0.5, 0);
     ctx.fillStyle = '#6f5234';
     for (let i = 0; i < 3; i++) ctx.fillRect(s.x - 4 + i * 3, s.y - 1 - i, 2.4, 1.4);
+  }
+
+  // ---- level crossings ------------------------------------------------------
+  // Sample the BUILT rail (loop up to loopFrac, branches up to paveFrac) and flag
+  // every integer tile that also carries a drivable road — those are the spots a
+  // road and the railway cross at grade.
+  function findCrossings(rail) {
+    const roadTiles = (C.infra.drivableTiles && C.infra.drivableTiles()) || [];
+    const out = [];
+    if (!roadTiles.length) return out;
+    const roadSet = new Set(roadTiles.map((t) => Math.round(t.tx) + ',' + Math.round(t.ty)));
+    const seen = new Set();
+    const step = 0.34;
+    const sample = (p) => {
+      const k = Math.round(p.tx) + ',' + Math.round(p.ty);
+      if (!roadSet.has(k) || seen.has(k)) return;
+      seen.add(k);
+      out.push({ tx: Math.round(p.tx), ty: Math.round(p.ty), dirx: p.dirx, diry: p.diry });
+    };
+    const builtArc = rail.loopFrac * rail.total;
+    for (let s = 0; s <= builtArc; s += step) sample(C.infra.posOnLoop(rail, s));
+    rail.branchGeo.forEach((br, i) => {
+      const pf = rail.branches[i].paveFrac; if (pf <= 0) return;
+      const bArc = pf * br.total;
+      for (let s = 0; s <= bArc; s += step) sample(C.infra.posOnPath(br, s));
+    });
+    return out;
+  }
+
+  // A grade crossing: an asphalt deck repaving the rail across the road, the rails
+  // carried over it, and a white stop line on each road approach.
+  function drawCrossing(ctx, c) {
+    const cx = c.tx + 0.5, cy = c.ty + 0.5;
+    const dx = c.dirx, dy = c.diry, px = -dy, py = dx;     // rail dir + road dir
+    const road = (C.PAL && C.PAL.road) || '#4e565f';
+    poly(ctx, [
+      w2s(cx + dx * -0.55 + px * -0.5, cy + dy * -0.55 + py * -0.5, 0.02),
+      w2s(cx + dx * 0.55 + px * -0.5, cy + dy * 0.55 + py * -0.5, 0.02),
+      w2s(cx + dx * 0.55 + px * 0.5, cy + dy * 0.55 + py * 0.5, 0.02),
+      w2s(cx + dx * -0.55 + px * 0.5, cy + dy * -0.55 + py * 0.5, 0.02),
+    ]);
+    ctx.fillStyle = road; ctx.fill();
+    for (const sgn of [-1, 1]) {
+      const r0 = w2s(cx + dx * -0.55 + px * sgn * RAIL_GAUGE, cy + dy * -0.55 + py * sgn * RAIL_GAUGE, 0.04);
+      const r1 = w2s(cx + dx * 0.55 + px * sgn * RAIL_GAUGE, cy + dy * 0.55 + py * sgn * RAIL_GAUGE, 0.04);
+      strokeBetween(ctx, r0, r1, 1.4, '#6b7178');
+    }
+    ctx.strokeStyle = 'rgba(236,238,240,0.82)'; ctx.lineWidth = 1.4; ctx.setLineDash([]);
+    for (const off of [-0.42, 0.42]) {
+      const w0 = w2s(cx + dx * -0.42 + px * off, cy + dy * -0.42 + py * off, 0.05);
+      const w1 = w2s(cx + dx * 0.42 + px * off, cy + dy * 0.42 + py * off, 0.05);
+      ctx.beginPath(); ctx.moveTo(w0.x, w0.y); ctx.lineTo(w1.x, w1.y); ctx.stroke();
+    }
   }
 
   // Track along a closed loop up to arc length `built`, with a work front + survey
@@ -247,26 +347,30 @@
     ctx.beginPath(); ctx.moveTo((mast.x + jib.x) / 2, (mast.y + jib.y) / 2); ctx.lineTo(hook.x, hook.y); ctx.stroke();
   }
 
-  // center: depot tile point; nrm: city-side normal {nx,ny}; prog 0..1; hue tints the headhouse.
-  // A station = raised platform (track-side safety edge) + a signed headhouse with
-  // a doorway + a posted canopy over the platform. While building, a crane stands in.
-  function drawDepot(ctx, center, nrm, prog, hue) {
+  // center: the RAIL point the train stops at; nrm: city-side normal {nx,ny};
+  // prog 0..1; hue tints the headhouse; half/depth size the platform. A station =
+  // a side platform that HUGS the track (so a stopped train's doors face it), a
+  // yellow safety edge on the track side, a headhouse set just behind it, and a
+  // posted canopy over the platform. While building, a crane stands in.
+  function drawDepot(ctx, center, nrm, prog, hue, half, depth) {
     const n = { x: nrm.nx, y: nrm.ny };
     const t = { x: -n.y, y: n.x };                         // along-track tangent
+    const PH = half || 2.2, PD = depth || 0.9;
     const C2 = (a, b, z) => w2s(center.tx + t.x * a + n.x * b, center.ty + t.y * a + n.y * b, z);
     const quad = (p0, p1, p2, p3, fill, stroke) => {
       poly(ctx, [p0, p1, p2, p3]);
       if (fill) { ctx.fillStyle = fill; ctx.fill(); }
       if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 0.8; ctx.stroke(); }
     };
-    // raised platform slab + a yellow safety edge along the track side
-    quad(C2(-1.3, -0.35, 0.5), C2(1.3, -0.35, 0.5), C2(1.3, 0.55, 0.5), C2(-1.3, 0.55, 0.5), 'rgba(198,203,210,0.96)', 'rgba(40,46,54,0.3)');
-    quad(C2(-1.3, -0.33, 0.55), C2(1.3, -0.33, 0.55), C2(1.3, -0.2, 0.55), C2(-1.3, -0.2, 0.55), 'rgba(216,182,72,0.9)');
+    // raised platform slab running ALONG the track (track edge at b≈-0.12, just
+    // over the near rail) + a yellow tactile safety strip on the track side
+    quad(C2(-PH, -0.12, 0.5), C2(PH, -0.12, 0.5), C2(PH, PD, 0.5), C2(-PH, PD, 0.5), 'rgba(198,203,210,0.96)', 'rgba(40,46,54,0.3)');
+    quad(C2(-PH, -0.12, 0.55), C2(PH, -0.12, 0.55), C2(PH, 0.02, 0.55), C2(-PH, 0.02, 0.55), 'rgba(216,182,72,0.9)');
 
-    // headhouse, inward of the platform; height rises with build progress
-    const hc = { tx: center.tx + n.x * 0.62, ty: center.ty + n.y * 0.62 };
-    const aabb = depotAABB(hc.tx, hc.ty, t, n, 1.8, 1.0);
-    const Hfull = 20, h = Math.max(2, Hfull * Math.min(1, prog));
+    // headhouse, set just BEHIND the platform (inward); height rises with progress
+    const hc = { tx: center.tx + n.x * (PD + 0.55), ty: center.ty + n.y * (PD + 0.55) };
+    const aabb = depotAABB(hc.tx, hc.ty, t, n, 1.9, 1.0);
+    const Hfull = 18, h = Math.max(2, Hfull * Math.min(1, prog));
     railBox(ctx, aabb.tx, aabb.ty, aabb.w, aabb.d, 0, h, hue, 14, 64);
 
     if (prog < 1) { drawCrane(ctx, aabb, Hfull, prog); return; }   // still under construction
@@ -281,14 +385,30 @@
     quad(w2s(aabb.tx + aabb.w * 0.42, fr, 0), w2s(aabb.tx + aabb.w * 0.6, fr, 0),
       w2s(aabb.tx + aabb.w * 0.6, fr, h * 0.42), w2s(aabb.tx + aabb.w * 0.42, fr, h * 0.42), '#2b2f36');
 
-    // platform canopy: a thin semi-transparent roof on four posts (riders show beneath)
+    // platform canopy: a thin semi-transparent roof on posts (riders show beneath),
+    // running the length of the platform over the track-side half
     const zCan = 8.5;
     ctx.strokeStyle = 'rgba(120,128,138,0.85)'; ctx.lineWidth = 1;
-    for (const [a, b] of [[-1.05, -0.25], [1.05, -0.25], [-1.05, 0.45], [1.05, 0.45]]) {
+    for (const [a, b] of [[-PH + 0.2, 0.0], [PH - 0.2, 0.0], [-PH + 0.2, PD - 0.1], [PH - 0.2, PD - 0.1]]) {
       const p0 = C2(a, b, 0.5), p1 = C2(a, b, zCan);
       ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
     }
-    quad(C2(-1.25, -0.35, zCan), C2(1.25, -0.35, zCan), C2(1.25, 0.55, zCan), C2(-1.25, 0.55, zCan), 'rgba(74,84,96,0.6)', 'rgba(255,255,255,0.18)');
+    quad(C2(-PH, -0.18, zCan), C2(PH, -0.18, zCan), C2(PH, PD, zCan), C2(-PH, PD, zCan), 'rgba(74,84,96,0.6)', 'rgba(255,255,255,0.18)');
+  }
+
+  // South-anchor depth for a whole station (platform + headhouse), so it sorts
+  // against buildings like everything else. Uses the SE corner (max tx+ty) of the
+  // union footprint — mirrors how drawDepot lays the platform and building out.
+  function depotDepth(center, nrm, half, depth) {
+    const n = { x: nrm.nx, y: nrm.ny }, t = { x: -n.y, y: n.x };
+    const PH = half || 2.2, PD = depth || 0.9;
+    const hc = { tx: center.tx + n.x * (PD + 0.55), ty: center.ty + n.y * (PD + 0.55) };
+    const aabb = depotAABB(hc.tx, hc.ty, t, n, 1.9, 1.0);
+    let mx = -Infinity, my = -Infinity;
+    const acc = (x, y) => { if (x > mx) mx = x; if (y > my) my = y; };
+    for (const a of [-PH, PH]) for (const b of [-0.18, PD]) acc(center.tx + t.x * a + n.x * b, center.ty + t.y * a + n.y * b);
+    acc(aabb.tx + aabb.w, aabb.ty + aabb.d);
+    return C.depthKey(mx, my);
   }
 
   // ---- train / shuttle cars -------------------------------------------------
@@ -296,7 +416,7 @@
   // stripe, and a vented roof; the lead car gets a cab windshield + headlights.
   // Drawn against the CAMERA-facing side/end (sign of the screen vectors) so it
   // reads correctly whichever way the train rounds the loop.
-  function drawCar(ctx, p, alpha, lead) {
+  function drawCar(ctx, p, alpha, lead, tail) {
     const base = w2s(p.tx + 0.5, p.ty + 0.5, 0);
     const fwd = w2s(p.tx + 0.5 + p.dirx, p.ty + 0.5 + p.diry, 0);
     const fx = fwd.x - base.x, fy = fwd.y - base.y, rx = -fy, ry = fx;
@@ -333,10 +453,14 @@
     } else {
       win(-hL * 0.82, -hL * 0.46); win(-hL * 0.32, hL * 0.02); win(hL * 0.16, hL * 0.5); win(hL * 0.64, hL * 0.88);
     }
+    // rear car: red tail lamps when the back end faces the camera
+    if (tail && fy < 0) {
+      const t1 = c(aE, -hW * 0.55, zF + 0.4), t2 = c(aE, hW * 0.55, zF + 0.4);
+      ctx.fillStyle = '#e23b2e'; ctx.beginPath();
+      ctx.arc(t1.x, t1.y, 0.7, 0, 7); ctx.arc(t2.x, t2.y, 0.7, 0, 7); ctx.fill();
+    }
     ctx.restore();
   }
-
-  function carPos(i) { return train.lead - i * (CAR_LEN + CAR_GAP); }
 
   function onScreen(tx, ty, vt, cw, ch) {
     const ss = w2s(tx + 0.5, ty + 0.5, 0);
@@ -357,31 +481,37 @@
       if (rail.branches[i].paveFrac > 0) list.push({ depth: TRACK_DEPTH + 1 + i, draw: (ctx) => drawBranch(ctx, br, rail.branches[i].paveFrac) });
     });
 
+    // grade crossings, on top of the bed where a road crosses the rail
+    for (const c of crossings) {
+      if (vt && !onScreen(c.tx, c.ty, vt, cw, ch)) continue;
+      list.push({ depth: TRACK_DEPTH + 200, draw: (ctx) => drawCrossing(ctx, c) });
+    }
+
     // core depots: platform appears once the loop reaches the stop; the building
     // then rises under a crane.
     rail.stations.forEach((s, i) => {
       if (!rail.complete && builtArc < s.sArc) return;
       if (vt && !onScreen(s.depot.tx, s.depot.ty, vt, cw, ch)) return;
       list.push({
-        depth: C.depthKey(s.depot.tx + 1, s.depot.ty + 1), draw: (ctx) => {
-          drawRailWorld(ctx, s.loop, s.spurEnd, true);   // subway-style siding into the city
-          drawDepot(ctx, s.depot, s.normal, rail.depotProg[i], 210);
-        },
+        depth: depotDepth(s.depot, s.normal, s.platHalf, s.platDepth),
+        draw: (ctx) => drawDepot(ctx, s.depot, s.normal, rail.depotProg[i], 210, s.platHalf, s.platDepth),
       });
     });
     // suburb depots: shown once their branch line is fully laid
     rail.branchGeo.forEach((br, i) => {
       if (rail.branches[i].paveFrac < 1) return;
       if (vt && !onScreen(br.depot.tx, br.depot.ty, vt, cw, ch)) return;
-      list.push({ depth: C.depthKey(br.depot.tx + 1, br.depot.ty + 1), draw: (ctx) => drawDepot(ctx, br.depot, br.normal, rail.branches[i].depotProg, 28) });
+      list.push({ depth: depotDepth(br.depot, br.normal, br.platHalf, br.platDepth), draw: (ctx) => drawDepot(ctx, br.depot, br.normal, rail.branches[i].depotProg, 28, br.platHalf, br.platDepth) });
     });
 
-    // main loop train
+    // main loop trains
     if (rail.complete) {
-      for (let i = 0; i < N_CARS; i++) {
-        const p = C.infra.posOnLoop(rail, carPos(i));
-        if (vt && !onScreen(p.tx, p.ty, vt, cw, ch)) continue;
-        list.push({ depth: C.depthKey(p.tx, p.ty), draw: (ctx) => drawCar(ctx, p, train.alpha, i === 0) });
+      for (const train of trains) {
+        for (let i = 0; i < N_CARS; i++) {
+          const p = C.infra.posOnLoop(rail, train.lead - i * (CAR_LEN + CAR_GAP));
+          if (vt && !onScreen(p.tx, p.ty, vt, cw, ch)) continue;
+          list.push({ depth: C.depthKey(p.tx, p.ty), draw: (ctx) => drawCar(ctx, p, train.alpha, i === 0, i === N_CARS - 1) });
+        }
       }
     }
     // suburb shuttles
@@ -392,7 +522,7 @@
         const p = C.infra.posOnPath(br, sh.pos - sh.dir * c * (CAR_LEN + CAR_GAP));
         if (vt && !onScreen(p.tx, p.ty, vt, cw, ch)) continue;
         const pp = sh.dir >= 0 ? p : { tx: p.tx, ty: p.ty, dirx: -p.dirx, diry: -p.diry };
-        list.push({ depth: C.depthKey(p.tx, p.ty), draw: (ctx) => drawCar(ctx, pp, sh.alpha, c === 0) });
+        list.push({ depth: C.depthKey(p.tx, p.ty), draw: (ctx) => drawCar(ctx, pp, sh.alpha, c === 0, c === SHUTTLE_CARS - 1) });
       }
     });
   }
@@ -401,19 +531,24 @@
 
   // ---- transit API (consumed by population.js) ------------------------------
   // Riders pick a line ('core' loop, or a branch 'b<k>'), walk to a depot, board
-  // when a train dwells there (dwellSid matches their stop), ride, and alight.
-  function dwellSid(line) {
+  // when a train dwells at THEIR stop, ride, and alight. With several trains on the
+  // loop, dwellingAt() tests a specific stop so two trains can serve two stations
+  // at once.
+  function dwellingAt(line, sid) {
     const rail = C.infra.rail();
-    if (!rail) return -1;
+    if (!rail) return false;
     if (line === 'core') {
-      if (train.atStation < 0) return -1;
-      return rail.depotProg[train.atStation] >= 1 ? rail.stations[train.atStation].sid : -1;
+      for (const train of trains) {
+        if (train.atStation < 0 || rail.stations[train.atStation].sid !== sid) continue;
+        if (rail.depotProg[train.atStation] >= 1) return true;
+      }
+      return false;
     }
     const k = parseInt(line.slice(1), 10);
     const sh = shuttles[k], br = rail.branchGeo[k];
-    if (!sh || !br || sh.atEnd < 0) return -1;
-    if (sh.atEnd === 1) return br.sid;                                  // suburb end
-    return rail.depotProg[br.coreIdx] >= 1 ? br.coreSid : -1;          // core end
+    if (!sh || !br || sh.atEnd < 0) return false;
+    if (sh.atEnd === 1) return br.sid === sid;                          // suburb end
+    return rail.depotProg[br.coreIdx] >= 1 && br.coreSid === sid;       // core end
   }
 
   C.rail = {
@@ -421,7 +556,7 @@
     transit: {
       ready: function () { const r = C.infra.rail(); return !!(r && r.complete && stationPts.length >= 2); },
       stations: function () { return stationPts; },
-      dwellSid: dwellSid,
+      dwellingAt: dwellingAt,
     },
   };
 })();

@@ -265,7 +265,8 @@
   // (to the platform, then from the destination platform to the goal) are driven
   // by the normal step() loop; this only handles the boarding/riding hand-offs.
   function handleTransit(ped, now) {
-    const dwell = C.rail.transit.dwellSid(ped.line);
+    const atHome = C.rail.transit.dwellingAt(ped.line, ped.homeSid);
+    const atDest = C.rail.transit.dwellingAt(ped.line, ped.destSid);
     switch (ped.tstate) {
       case 'toStation': {            // reached the access node — step onto the platform
         ped.path = [{ tx: ped.tx, ty: ped.ty }, platformSpot(ped.hx, ped.hy, ped)];
@@ -277,11 +278,11 @@
         break;
       case 'waiting':                // board when our train is at the platform
         ped.moving = false;
-        if (dwell === ped.homeSid) ped.tstate = 'riding';
+        if (atHome) ped.tstate = 'riding';
         break;
       case 'riding':                 // hidden aboard until the destination stop
         ped.moving = false;
-        if (dwell === ped.destSid) {
+        if (atDest) {
           const spot = platformSpot(ped.dx2, ped.dy2, ped);
           ped.tx = spot.tx; ped.ty = spot.ty; ped.alpha = 0;   // reappear, fade in
           ped.path = null; ped.tstate = 'fromStation';
